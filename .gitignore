@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.RDataTmp
+.docx
+
+/Data/
+/extra/
+prueba.html
+prueba.qmd
