@@ -1,0 +1,22 @@
+"0","# load the packages
+library(foreign) ; library(tsModel) ; library(""lmtest"") ; library(""Epi"")
+"
+"2","Time Series Modeling for Air Pollution and Health (0.6-1)
+"
+"2","
+Attaching package: ‘Epi’
+
+"
+"2","The following object is masked from ‘package:lme4’:
+
+    factorize
+
+"
+"2","The following object is masked from ‘package:rio’:
+
+    factorize
+
+"
+"0","library(""splines"") ; library(""vcd"")"
+"2","Loading required package: grid
+"

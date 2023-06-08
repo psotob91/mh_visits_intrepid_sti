@@ -1,0 +1,11 @@
+"0","library(glarma)"
+"2","
+Attaching package: ‘glarma’
+
+"
+"2","The following object is masked from ‘package:forecast’:
+
+    forecast
+
+"
+"0","data(Asthma)"

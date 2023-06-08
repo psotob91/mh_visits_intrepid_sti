@@ -1,0 +1,742 @@
+---
+title: "27_04_23_Model_MH"
+subtitle: "Modeling forecast count for MH"
+execute: 
+  message: false
+  echo: true
+  warning: false
+  error: true
+
+format: 
+  html:
+    self-contained: true
+    code-line-numbers: true
+
+custom_title_page: false
+filters:
+  - lightbox
+lightbox: auto
+---
+
+### Log
+> Version 2023-03-29.   
+Code was initially made in SAS and send by ___Jemisha Apajee___. 
+File Name: "Analysis_common_diseases_step_by_step_20221123.sas"
+
+> Version 2023-04-19   
+Translated to R by ___Javier Silva-Valencia___, adapted to Mental Health paper
+
+> Version 2023-05-17   
+Whitout social problems
+
+### Context/Notes
+
+- This is part of a mental health paper, where we are analyzing the amount of MH-related visits among several countries (countries part of INTREPID) in a pre and during pandemic period.
+
+- The main variables are: Amount of total visits, amount of visits related to MH, 7-9 categories of MH groups, Tipe of visit(in-person, virtual) all this by month from 2018 to 2021 (Except Perú that has data from 2019-2021)
+
+- ___This specific code___ is for creating a model that fits the time series and creating a forecast to compare prepandemic and pandemic trend.
+
+
+## Getting ready
+
+#### Load packages
+
+```{r,  results='hide', warning=FALSE, message = FALSE, collapse = TRUE}
+
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(rio, 
+               here,
+               tidyverse,
+               purrr, 
+               patchwork, 
+               scales, 
+               DT, 
+               janitor, 
+               lubridate, 
+               gtsummary, 
+               broom, 
+               broom.mixed,
+               ggeffects, 
+               lme4, 
+               nlme, 
+               forecast, 
+               MASS, 
+               glmmTMB, 
+               tscount, 
+               zoo, 
+               DHARMa)
+
+# rm(list = ls())       #To clear the environment and start from zero.
+# 
+# Colors' palette
+cbPalette <- c("#999999",  # 1
+               "#E69F00",  # 2
+               "#56B4E9",  # 3
+               "#009E73",  # 4
+               "#F0E442",  # 5
+               "#0072B2",  # 6
+               "#D55E00",  # 7
+               "#CC79A7")  # 8 
+```
+
+
+#### Read in data
+
+```{r}
+mh_visits <- import(here("Data", "All_countries_MHcounts.xlsx"), sheet = "MH_counts")
+```
+
+#### View data structure
+
+```{r}
+datatable(head(mh_visits, 100))    #Seeing first 10 rows of the dataset
+```
+
+
+## Cleaning
+
+#### Creating variables
+
+Create date:
+
+```{r}
+mh_visits <- mh_visits %>%
+  mutate(date = as.Date(paste(month, "01", year), format = "%m %d %Y")) %>% 
+  arrange(country, date)
+```
+
+Variables of interest for Mental Healht (MH) analysis
+
+```{r}
+# Select variable of interest
+mh_visits1 <- mh_visits |> 
+  dplyr::select(country, 
+         mh_category,
+         year,
+         month,
+         date,
+         den_total, 
+         total_counts, 
+         in_person_counts, 
+         virtual_counts, 
+         period)
+
+#Sorting
+mh_visits1 <- mh_visits1 %>% 
+  arrange(country, date, mh_category)
+
+# Rename columns
+mh_visits1 <- mh_visits1 %>%
+  rename(numerator = total_counts,         #MH counts
+         denominator = den_total)          #Total visits per month
+```
+
+#### Check for missings
+
+```{r}
+mh_visits1 %>%
+  tabyl(country, period, show_na = TRUE)           #No missings
+```
+
+#### Sort categories of MH
+
+```{r}
+#Eliminando categorias eliminadas
+mh_visits2 <- mh_visits1 %>% 
+  filter(!(mh_category %in% c("Social Problems"))) 
+
+# Establecer el nuevo orden para las categorías
+new_order <- c("Anxiety and Mood Disorders", 
+               "Bipolar, Schizophrenia and other Psycotic Disorders",
+               "Dementia", 
+               "ADHD and Eating Disorders", 
+               "Sleep Disorders", 
+               "Substance-Related and Addictive Disorders")
+
+# Reorder categories
+mh_visits2 <- mh_visits2 %>% 
+  filter(mh_category %in% new_order) %>% 
+  mutate(mh_category = fct_relevel(factor(mh_category), new_order))
+```
+
+
+## Modelling
+
+####  Set up data for modelling
+
+```{r}
+pandemic_start       <- as.Date("2020-04-01")        #For all the countries the pandemic start april 2020 *To revise
+
+pandemic_start_china <- as.Date("2020-02-01")  #For china pandemic start at feb 2020
+
+mh_visits5           <- mh_visits2 %>%
+  # create t = 1, ..., 48 for each country (except peru)
+  mutate(
+    tn = if_else(country != "Peru", 
+                 (12 * (year - 2018)) + month, 
+                 (12 * (year - 2019)) + month),
+      
+  # sine and cosine functions
+  # pi               <- (4 * atan(1.0)),
+  # s = sin(2 * month * pi / 12),
+  # s6 = sin(2 * month * pi / 6),
+  # c = cos(2 * month * pi / 12),
+  # c6 = cos(2 * month * pi / 6),
+  time = tn, # for random effects in the residuals
+  # logdenominator = log(denominator), # offset
+
+  #Spliting N# visits into two variables (pre and post start of pandemic)   
+  y_count = case_when(
+    country != "China" & date < pandemic_start ~ numerator,
+    country == "China" & date < pandemic_start_china ~ numerator,
+    TRUE ~ NA_real_
+    ),
+  observed_count = case_when(
+    country != "China" & date >= pandemic_start ~ numerator,
+    country == "China" & date >= pandemic_start_china ~ numerator,
+    TRUE ~ NA_real_
+    ),
+      
+  # Dummy variables for China (changes in their health system administration)
+  China_Jan19 = if_else(date >= as.Date("2019-01-01"), 1, 0),
+  China_Dec20 = if_else(date >= as.Date("2020-12-01"), 1, 0),
+      
+  # Pre-post tag variable
+  country = as.factor(country),
+  pre_post = if_else(period == "pre-pandemic", 0, 1), 
+  pre_postTo = if_else(is.na(y_count), "post", "pre"),      #pre/post binary variable
+      
+  #"tn" as a factor (will be a classification variable)
+  tn = as.factor(tn), 
+  
+  #Creating variable for interaction pre-post exposure (wahsout would be on pre exposure)
+  To = ifelse(period %in% c("pre-pandemic", "washout"), 0, 1), 
+  
+  # Creating rate variable for graphics
+  rate = 10000 * numerator / denominator
+  ) 
+```
+
+```{r}
+ # Obtaining the number of time where the "pandemic" initiate
+mh_visits5 |> 
+  arrange(country, mh_category, time) |> 
+  filter(pre_post == 1) |> 
+  group_by(country, mh_category) |> 
+  summarize(start_time_of_pandemic = min(time)) |> 
+  ungroup() -> index
+
+mh_visits5 |> 
+  arrange(country, mh_category, time) |> 
+  filter(To == 1) |> 
+  group_by(country, mh_category) |> 
+  summarize(start_time_of_pandemic = min(time)) |> 
+  ungroup() -> indexTo
+```
+
+## Pre-pandemic behaviour of outcomes (blind to post-pandemic)
+
+```{r}
+min_tdate <- min(mh_visits5$date) #- month(1)
+max_tdate <- max(mh_visits5$date) #+ month(1)
+
+countryc <-  mh_visits5 |> 
+  count(country) |> 
+  pull(country) |> 
+  as.character()
+
+mh_categoryc <- mh_visits5 |> 
+  count(mh_category) |> 
+  pull(mh_category) |> 
+  as.character()
+
+sti_plotter_pre <- function(countryd, mh_categoryd) {
+  
+  index |> 
+    filter(country == countryd, mh_category == mh_categoryd) |> 
+    pull(start_time_of_pandemic) -> time_pand
+  
+  mh_visits5 |> 
+    filter(country == countryd, mh_category == mh_categoryd, 
+             time == time_pand) |> 
+    pull(date) -> tpand_date
+  
+  mh_visits5 |> 
+    filter(country == countryd, mh_category == mh_categoryd) |> 
+    filter(time < time_pand) -> data_filtered
+  
+  max_y <- max(data_filtered$rate) 
+  min_y <- min(data_filtered$rate) 
+  # min_y <- 0
+  n <- dim(data_filtered)[1]
+  k <- (max_y - min_y) / (log2(n) + 1) # Sturges's rule
+      
+  mh_visits5 |> 
+    filter(country == countryd, mh_category == mh_categoryd) |> 
+    filter(time < time_pand) |> 
+    ggplot(aes(x = date, y = rate)) + 
+    geom_point(shape = 4, color = cbPalette[6]) +  
+    labs(x = "", 
+         y = paste("Incidence Rate of ", mh_categoryd, "\n in " , 
+                   countryd, " per 10,000 habitants")) + 
+    theme_classic() +
+    scale_x_date(limits = c(min_tdate, max_tdate),
+                 breaks = "1 month", 
+                 expand = expansion(mult = c(0.01, 0.01)),
+                 labels = date_format("%b-%Y"), 
+                 date_minor_breaks = "1 month") + 
+    scale_y_continuous(breaks = round(seq(min_y, max_y, k), 1), 
+                       minor_breaks = round(seq(min_y, max_y, k), 1)) + 
+    geom_vline(xintercept = tpand_date, linetype = 2, color = cbPalette[7]) +
+    theme(axis.text = element_text(size = 8),
+          axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1), 
+          panel.grid.major.y = element_line(color = cbPalette[1], 
+                                            linewidth = 1, 
+                                            linetype = 0.001), 
+          panel.grid.minor.y = element_line(color = cbPalette[1], 
+                                            linewidth = 0.001, 
+                                            linetype = 1)) -> plot
+  
+  return(plot)
+}
+
+combinations <- expand.grid(country = countryc, mh_category = mh_categoryc)
+
+combinations <- combinations %>%
+  mutate(plot = map2(country, mh_category, ~ sti_plotter_pre(.x, .y))) %>%
+  pwalk(~ ggsave(here("img", paste0(..1, "_", ..2, ".png")), ..3))
+
+# Extrae la lista de gráficos
+plots_list <- combinations$plot
+```
+
+::: {.panel-tabset}
+
+### Anxiety/Mood
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Bipolar/Schiz./Psycotic
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Dementia
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### ADHD/Eating
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Sleep
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Substance-Related/Addictive
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+:::
+
+
+```{r}
+library(glarma)
+data(Asthma)
+```
+

@@ -1,0 +1,10 @@
+"0","# Model"
+"0","mod_full <- sti_model(country = countryc[i], "
+"0","          mh_category = mh_categoryc[j], "
+"0","          p = 1, q = 0, "
+"0","          data = mh_visits5b)"
+"2","`summarise()` has grouped output by 'country'. You can override using the `.groups` argument."
+"2","iteration 1
+"
+"2","iteration 2
+"

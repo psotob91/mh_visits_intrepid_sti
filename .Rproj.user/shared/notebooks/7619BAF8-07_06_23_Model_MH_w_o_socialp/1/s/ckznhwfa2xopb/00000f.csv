@@ -1,0 +1,2 @@
+"0","res <- simulateResiduals(nb2_USAmodel)"
+"0","plot(res)"

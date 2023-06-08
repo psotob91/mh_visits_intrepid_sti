@@ -1,0 +1,6 @@
+"0","library(tidyverse)"
+"0","library(rio)"
+"0","library(here)"
+"0","library(tsModel)"
+"0",""
+"0","data <- import(here(""extra"", ""math_stat_validations"", ""data.rds""))"

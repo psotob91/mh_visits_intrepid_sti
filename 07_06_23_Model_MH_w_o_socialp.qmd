@@ -1,0 +1,7040 @@
+---
+title: "27_04_23_Model_MH"
+subtitle: "Modeling forecast count for MH"
+execute: 
+  message: false
+  echo: true
+  warning: false
+  error: true
+
+format: 
+  html:
+    self-contained: true
+    code-line-numbers: true
+    code-fold: true
+    code-tools: true
+
+custom_title_page: false
+filters:
+  - lightbox
+lightbox: auto
+---
+
+### Log
+> Version 2023-03-29.   
+Code was initially made in SAS and send by ___Jemisha Apajee___. 
+File Name: "Analysis_common_diseases_step_by_step_20221123.sas"
+
+> Version 2023-04-19   
+Translated to R by ___Javier Silva-Valencia___, adapted to Mental Health paper
+
+> Version 2023-05-17   
+Whitout social problems
+
+> Version 2023-06-07   
+Code debugged by **Percy Soto-Becerra**. The model's problem was fixed. Diagnostic regression assessment was performed.
+
+### Context/Notes
+
+- This is part of a mental health paper, where we are analyzing the amount of MH-related visits among several countries (countries part of INTREPID) in a pre and during pandemic period.
+
+- The main variables are: Amount of total visits, amount of visits related to MH, 7-9 categories of MH groups, Tipe of visit(in-person, virtual) all this by month from 2018 to 2021 (Except Perú that has data from 2019-2021)
+
+- ___This specific code___ is for creating a model that fits the time series and creating a forecast to compare prepandemic and pandemic trend.
+
+
+## Getting ready
+
+### Load packages
+
+```{r,  results='hide', warning=FALSE, message = FALSE, collapse = TRUE}
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(rio, 
+               here,
+               tidyverse,
+               purrr, 
+               patchwork, 
+               scales, 
+               DT, 
+               janitor, 
+               lubridate, 
+               gtsummary, 
+               broom, 
+               broom.mixed,
+               ggeffects, 
+               lme4, 
+               nlme, 
+               forecast, 
+               MASS, 
+               mgcv, 
+               tsModel,
+               zoo, 
+               DHARMa, 
+               patchwork,
+               tsibble, 
+               feasts, 
+               qqplotr, 
+               parameters, 
+               flextable,
+               stringr, 
+               imputeTS)
+
+source(here("source", "diag_glmm.R"))
+source(here("source", "sti_plotter_pre.R"))
+source(here("source", "sti_model.R"))
+source(here("source", "sti_model_china.R"))
+source(here("source", "sti_model_norway.R"))
+source(here("source", "sti_model_usa.R"))
+source(here("source", "sti_effect_ploter.R"))
+
+# rm(list = ls())       #To clear the environment and start from zero.
+# 
+# Colors' palette
+cbPalette <- c("#999999",  # 1
+               "#E69F00",  # 2
+               "#56B4E9",  # 3
+               "#009E73",  # 4
+               "#F0E442",  # 5
+               "#0072B2",  # 6
+               "#D55E00",  # 7
+               "#CC79A7")  # 8 
+```
+
+
+### Read in data
+
+```{r}
+mh_visits <- import(here("Data", "All_countries_MHcounts.xlsx"), sheet = "MH_counts")
+```
+
+### View data structure
+
+```{r}
+datatable(head(mh_visits, 100))    #Seeing first 10 rows of the dataset
+```
+
+
+## Cleaning
+
+### Creating variables
+
+Create date:
+
+```{r}
+mh_visits <- mh_visits %>%
+  mutate(date = as.Date(paste(month, "01", year), format = "%m %d %Y")) %>% 
+  arrange(country, date)
+```
+
+Variables of interest for Mental Healht (MH) analysis
+
+```{r}
+# Select variable of interest
+mh_visits1 <- mh_visits |> 
+  dplyr::select(country, 
+         mh_category,
+         year,
+         month,
+         date,
+         den_total, 
+         total_counts, 
+         in_person_counts, 
+         virtual_counts, 
+         period)
+
+#Sorting
+mh_visits1 <- mh_visits1 %>% 
+  arrange(country, date, mh_category)
+
+# Rename columns
+mh_visits1 <- mh_visits1 %>%
+  rename(numerator = total_counts,         #MH counts
+         denominator = den_total)          #Total visits per month
+```
+
+### Check for missings
+
+```{r}
+mh_visits1 %>%
+  tabyl(country, period, show_na = TRUE)           #No missings
+```
+
+### Sort categories of MH
+
+```{r}
+#Eliminando categorias eliminadas
+mh_visits2 <- mh_visits1 %>% 
+  filter(!(mh_category %in% c("Social Problems"))) 
+
+# Establecer el nuevo orden para las categorías
+new_order <- c("Anxiety and Mood Disorders", 
+               "Bipolar, Schizophrenia and other Psycotic Disorders",
+               "Dementia", 
+               "ADHD and Eating Disorders", 
+               "Sleep Disorders", 
+               "Substance-Related and Addictive Disorders")
+
+# Reorder categories
+mh_visits2 <- mh_visits2 %>% 
+  filter(mh_category %in% new_order) %>% 
+  mutate(mh_category = fct_relevel(factor(mh_category), new_order))
+```
+
+###  Set up data for modelling
+
+```{r}
+pandemic_start       <- as.Date("2020-04-01")        #For all the countries the pandemic start april 2020 *To revise
+
+pandemic_start_china <- as.Date("2020-02-01")  #For china pandemic start at feb 2020
+
+mh_visits5           <- mh_visits2 %>%
+  # create t = 1, ..., 48 for each country (except peru)
+  mutate(
+    tn = if_else(country != "Peru", 
+                 (12 * (year - 2018)) + month, 
+                 (12 * (year - 2019)) + month),
+  time = tn, # for random effects in the residuals
+  #Spliting N# visits into two variables (pre and post start of pandemic)   
+  y_count = case_when(
+    country != "China" & date < pandemic_start ~ numerator,
+    country == "China" & date < pandemic_start_china ~ numerator,
+    TRUE ~ NA_real_
+    ),
+  observed_count = case_when(
+    country != "China" & date >= pandemic_start ~ numerator,
+    country == "China" & date >= pandemic_start_china ~ numerator,
+    TRUE ~ NA_real_
+    ),
+      
+  # Dummy variables for China (changes in their health system administration)
+  China_Jan19 = if_else(date >= as.Date("2019-01-01"), 1, 0),
+  China_Dec20 = if_else(date >= as.Date("2020-12-01"), 1, 0),
+  Norway_Feb21 = if_else(time >= 38, 1, 0), 
+  USA_systdown = if_else(time >= 37 & time <= 39, 1, 0), 
+  
+  # Pre-post tag variable
+  country = as.factor(country),
+  pre_post = if_else(period == "pre-pandemic", 0, 1), 
+  pre_postTo = if_else(is.na(y_count), "post", "pre"),      #pre/post binary variable
+      
+  #"tn" as a factor (will be a classification variable)
+  tn = as.factor(tn), 
+  
+  #Creating variable for interaction pre-post exposure (wahsout would be on pre exposure)
+  To = ifelse(period %in% c("pre-pandemic", "washout"), 0, 1), 
+  
+  # Creating rate variable for graphics
+  rate = 10000 * numerator / denominator
+  ) 
+
+mh_visits_all <- mh_visits5 %>% 
+  group_by(country, date) %>% 
+  summarize(
+    year = max(year),
+    month = max(month),
+    denominator = max(denominator),
+    numerator = sum(numerator),
+    observed_count = sum(observed_count),
+    To = max(To), 
+    time = max(time),
+    period = max(period), 
+    China_Jan19 = max(China_Jan19), 
+    China_Dec20 = max(China_Dec20)
+  ) %>%
+  ungroup() |> 
+  mutate(mh_category = "All common Mental Health disorders", 
+         Norway_Feb21 = if_else(time >= 38, 1, 0), 
+         USA_systdown = if_else(time >= 37 & time <= 39, 1, 0))
+
+mh_visits_all  |> 
+  bind_rows(mh_visits5) -> mh_visits5b
+```
+
+### Pre-pandemic behaviour of outcomes (blinded to post-pandemic)
+
+```{r}
+#| warning: false
+#| message: false
+min_tdate <- min(mh_visits5$date) #- month(1)
+max_tdate <- max(mh_visits5$date) #+ month(1)
+
+countryc <-  mh_visits5 |> 
+  count(country) |> 
+  pull(country) |> 
+  as.character()
+
+mh_categoryc <- mh_visits5 |> 
+  count(mh_category) |> 
+  pull(mh_category) |> 
+  as.character()
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+combinations <- expand.grid(country = countryc, mh_category = mh_categoryc)
+
+combinations <- combinations %>%
+  mutate(plot = map2(country, mh_category, ~ 
+                       sti_plotter_pre(.x, .y, 
+                                       blind = FALSE, 
+                                       data = mh_visits5))) %>%
+  pwalk(~ ggsave(filename = paste0(..1, "_", ..2, ".png"), 
+                 plot = ..3, 
+                 device = "png", 
+                 path = here("img", "exploratory_plots"), 
+                 scale = 2, 
+                 width = 7, 
+                 height = 7, 
+                 units = "cm", 
+                 dpi = 900
+                 ))
+
+# Extrae la lista de gráficos
+plots_list <- combinations$plot
+```
+
+::: {.panel-tabset}
+
+### Anxiety/Mood
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Bipolar/Schiz./Psycotic
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Dementia
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### ADHD/Eating
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Sleep
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+### Substance-Related/Addictive
+
+
+::: {.panel-tabset}
+
+### Argentina
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Australia
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Canada
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### China
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Norway
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Peru
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Singapore
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### Sweden
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+### USA
+
+```{r}
+i <- i + 1
+plots_list[[i]]
+```
+
+:::
+
+:::
+
+## Creating and Testing the Model
+
+```{r}
+# Countries and categories
+countryc <-  mh_visits5b |> 
+  count(country) |> 
+  pull(country) |> 
+  as.character()
+
+countryc <- rep(countryc, 7)
+
+
+mh_categoryc <- mh_visits5b |> 
+  mutate(
+    mh_category = 
+      factor(mh_category, 
+             levels = c("All common Mental Health disorders", 
+                        "Anxiety and Mood Disorders", 
+                        "ADHD and Eating Disorders", 
+                        "Bipolar, Schizophrenia and other Psycotic Disorders", 
+                        "Dementia", 
+                        "Sleep Disorders", 
+                        "Substance-Related and Addictive Disorders"))) |> 
+  count(mh_category) |> 
+  pull(mh_category) |> 
+  as.character()
+```
+
+## Modelling
+
+### Set global options
+
+```{r}
+# set options of graphics
+alfa0 <- 0.5
+alfa_ribbon0 <- 0.25
+color_point0 <- c("#99B933")
+color_line0 <- c("#002D72")
+color_interrupt0 <- c("red")
+color_ribbon_ex0 <- c("skyblue")
+color_ribbon_def0 <- c("orange")
+mindate0 <- "2018-01-01"
+maxdate0 <- "2022-01-01"
+```
+
+### **Outcome:** All common Mental Health disorders
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+i <- 0
+```
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab0 |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+:::{.callout-important collapse=false appearance='default' icon=true}
+## Notes
+- Report in text (maybe in supplementary table?) that including period of shock (t > Dec 2020) does not significantly change the results.
+:::
+
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot7
+
+plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+
+### **Outcome:** Anxiety and Mood Disorders
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot7
+
+plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+
+
+### **Outcome:** ADHD and Eating Disorders
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+Modeling `r mh_categoryc[j]` for Singapore is not appropiate due to missing data in numerator.
+
+```{r}
+fake <- data.frame(x = seq(1, 48, 1), 
+                   y = seq(1, 48, 1))
+
+fake |> 
+  ggplot(aes(x = x, y = y)) + 
+  theme_void() + 
+  annotate(geom = "text", 
+           x = 24, 
+           y = 24, 
+           label = "Not calculable", 
+           color = "black", 
+           size = 6) -> plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+
+
+### **Outcome:** Bipolar, Schizophrenia and other Psycotic Disorders
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot7
+
+plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+
+
+### **Outcome:** Dementia
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot7
+
+plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+
+
+### **Outcome:** Sleep Disorders
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+Modeling `r mh_categoryc[j]` for Singapore is not appropiate due to missing data in numerator.
+
+```{r}
+fake <- data.frame(x = seq(1, 48, 1), 
+                   y = seq(1, 48, 1))
+
+fake |> 
+  ggplot(aes(x = x, y = y)) + 
+  theme_void() + 
+  annotate(geom = "text", 
+           x = 24, 
+           y = 24, 
+           label = "Not calculable", 
+           color = "black", 
+           size = 6) -> plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+
+
+### **Outcome:** Substance-Related and Addictive Disorders
+
+::: {.panel-tabset}
+
+### Countries
+
+1. Argentina
+2. Australia
+3. Canada
+4. China
+5. Norway
+6. Peru
+7. Singapore
+8. Sweden
+9. USA
+
+### Argentina
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 5, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot1
+
+plot1
+```
+
+### Australia
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot2
+
+plot2
+```
+
+
+### Canada
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot3
+
+plot3
+```
+
+
+### China
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_china(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 2, q = 1, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot4
+
+plot4
+```
+
+### Norway
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE, 
+          mean_cond = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot5
+
+plot5
+```
+
+
+### Peru
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 8, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot6
+
+plot6
+```
+
+### Singapore
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 11, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot7
+
+plot7
+```
+
+### Sweden
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 6, q = 0, 
+          data = mh_visits5b)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot8
+
+plot8
+```
+
+
+### USA
+
+```{r}
+#| message: false
+#| warning: false
+# Set the counter
+i <- i + 1
+if (i %% 9 == 0) {
+    j <- (i - 1) %/% 9 + 1
+  } else {
+    j <- i %/% 9 + 1
+  }
+```
+
+- **Country:** `r countryc[i]`
+- **Mental Health Category:** `r mh_categoryc[j]`
+
+```{r}
+# Model
+mod_full <- sti_model_usa(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = TRUE)
+```
+
+- The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$auto_plot; mod_full$arima
+```
+
+- The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
+
+```{r}
+#| message: false
+#| warning: false
+mod_full$dx.plot
+```
+
+The final model is the following: 
+
+```{r}
+summary(mod_full$mod)
+```
+
+```{r}
+parameters::model_parameters(mod_full$mod) |> 
+  dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
+  filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
+  as_data_frame() |> 
+  rename(est = Coefficient, 
+         ll = CI_low, 
+         ul = CI_high) |> 
+  mutate(effect = c("Level change", "Trend change"), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         p = if_else(p < 0.001, "p < 0.001", 
+                     as.character(paste0("p = ", round(p, 3)))), 
+         estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
+         estimate = as.character(estimate), 
+         mh_category = mh_categoryc[j], 
+         country = countryc[i]
+         ) |> 
+  dplyr::select(country, mh_category, effect, estimate) -> tab0
+
+tab <- tab0 |>
+  bind_rows(tab)
+
+tab |> 
+  knitr::kable()
+```
+
+```{r}
+#| warning: false
+#| message: false
+sti_effect_ploter(mod_full, 
+                  alfa = alfa0,
+                  alfa_ribbon = alfa_ribbon0,
+                  color_point = color_point0, 
+                  color_line = color_line0, 
+                  color_ribbon_ex = color_ribbon_ex0,
+                  color_ribbon_def = color_ribbon_def0, 
+                  color_interrupt = color_interrupt0,
+                  mindate = mindate0, 
+                  maxdate = maxdate0) -> plot9
+
+plot9
+```
+
+:::
+
+#### Table
+
+```{r}
+# Cargar la biblioteca
+
+tab_f <- tab |> 
+  arrange(country, effect) |> 
+  mutate(
+    country_effect = if_else(effect == "Level change", country, NA_character_),
+    effect = case_when(
+      effect == "Level change" ~ "   Level change",
+      effect == "Trend change" ~ "   Trend change"
+    )
+  ) |> 
+  dplyr::select(-mh_category, -country) |> 
+  dplyr::select(country_effect, effect, estimate)
+
+# Crear la tabla flextable
+ft <- flextable(tab_f)
+
+# Cambiar los nombres de las columnas
+ft <- set_header_labels(ft, 
+                        country_effect = "Country",
+                        effect = "Effect measure", 
+                        estimate = "IRR (95%CI), p-value")
+
+# Formatear la tabla
+ft <- ft %>%
+  align(align = "left") %>%
+  padding(padding = 5) %>%
+  fontsize(size = 11) %>%
+  bold(part = "header") %>%
+  bold(i = which(!is.na(tab_f$country_effect)), j = "country_effect") %>%
+  autofit()
+
+# Guardar como documento de Word
+save_as_docx(ft, 
+             path = here("table_effects", 
+                         paste0("table_", mh_categoryc[j], ".docx")))
+
+ft
+```
+
+
+#### Plot
+
+```{r}
+#| warning: false
+#| message: false
+((plot1 | plot2 | plot3) / 
+  (plot4 | plot5 | plot6) / 
+  (plot7 | plot8 | plot9)) + 
+  plot_layout(guides = 'collect') + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(legend.position="bottom") -> plot_effect_final
+
+ggsave(filename = paste0(mh_categoryc[j], ".png"), 
+       plot = plot_effect_final, 
+       device = "png", 
+       path = here("img", "plot_effects"), 
+       scale = 1.5, 
+       width = 18, 
+       height = 18, 
+       units = "cm", 
+       dpi = 900)
+```
+
+```{r}
+knitr::include_graphics(here("img", 
+                             "plot_effects", 
+                             paste0(mh_categoryc[j], ".png")))
+```
+
+## Reproducibility Ticket
+
+```{r}
+sessionInfo()
+```
+
