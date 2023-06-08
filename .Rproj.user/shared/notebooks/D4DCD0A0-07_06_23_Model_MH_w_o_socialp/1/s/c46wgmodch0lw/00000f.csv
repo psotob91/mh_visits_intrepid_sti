@@ -1,3 +1,0 @@
-"0","mh_visits <- mh_visits %>%"
-"0","  mutate(date = as.Date(paste(month, ""01"", year), format = ""%m %d %Y"")) %>% "
-"0","  arrange(country, date)"
