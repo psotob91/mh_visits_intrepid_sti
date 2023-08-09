@@ -840,7 +840,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -930,7 +930,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1021,7 +1021,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1079,7 +1079,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 
@@ -1114,7 +1114,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1177,8 +1177,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -1212,7 +1213,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1303,7 +1304,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1394,7 +1395,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1447,10 +1448,13 @@ if (i %% 9 == 0) {
 
 ```{r}
 # Model
-mod_full <- sti_model(country = countryc[i], 
+mod_full <- sti_model_norway(country = countryc[i], 
           mh_category = mh_categoryc[j], 
           p = 6, q = 0, 
-          data = mh_visits5b)
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -1484,7 +1488,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1574,7 +1578,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1756,7 +1760,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1845,7 +1849,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1936,7 +1940,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -1993,7 +1997,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -2027,7 +2031,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2084,8 +2088,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -2119,7 +2124,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2210,7 +2215,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2301,7 +2306,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2354,10 +2359,13 @@ if (i %% 9 == 0) {
 
 ```{r}
 # Model
-mod_full <- sti_model(country = countryc[i], 
+mod_full <- sti_model_norway(country = countryc[i], 
           mh_category = mh_categoryc[j], 
           p = 6, q = 0, 
-          data = mh_visits5b)
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -2391,7 +2399,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2482,7 +2490,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2666,7 +2674,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2755,7 +2763,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2846,7 +2854,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2904,7 +2912,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -2938,7 +2946,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -2995,8 +3003,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -3030,7 +3039,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3121,7 +3130,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3245,7 +3254,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3338,7 +3347,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3521,7 +3530,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3611,7 +3620,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3701,7 +3710,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3758,7 +3767,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -3792,7 +3801,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3849,8 +3858,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -3884,7 +3894,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -3975,7 +3985,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4065,7 +4075,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4118,10 +4128,13 @@ if (i %% 9 == 0) {
 
 ```{r}
 # Model
-mod_full <- sti_model(country = countryc[i], 
+mod_full <- sti_model_norway(country = countryc[i], 
           mh_category = mh_categoryc[j], 
           p = 6, q = 0, 
-          data = mh_visits5b)
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -4155,7 +4168,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4247,7 +4260,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4431,7 +4444,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4521,7 +4534,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4611,7 +4624,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4669,7 +4682,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -4703,7 +4716,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4761,8 +4774,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -4796,7 +4810,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4887,7 +4901,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -4977,7 +4991,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5030,10 +5044,13 @@ if (i %% 9 == 0) {
 
 ```{r}
 # Model
-mod_full <- sti_model(country = countryc[i], 
+mod_full <- sti_model_norway(country = countryc[i], 
           mh_category = mh_categoryc[j], 
           p = 6, q = 0, 
-          data = mh_visits5b)
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -5067,7 +5084,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5158,7 +5175,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5342,7 +5359,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5431,7 +5448,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5521,7 +5538,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5578,7 +5595,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -5612,7 +5629,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5670,8 +5687,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -5705,7 +5723,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5796,7 +5814,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -5883,10 +5901,13 @@ if (i %% 9 == 0) {
 
 ```{r}
 # Model
-mod_full <- sti_model(country = countryc[i], 
+mod_full <- sti_model_norway(country = countryc[i], 
           mh_category = mh_categoryc[j], 
           p = 6, q = 0, 
-          data = mh_visits5b)
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -5920,7 +5941,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6011,7 +6032,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6195,7 +6216,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6285,7 +6306,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6376,7 +6397,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6434,7 +6455,7 @@ mod_full <- sti_model_china(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 2, q = 1, 
           data = mh_visits5b, 
-          shock_exclude = TRUE)
+          shock_exclude = FALSE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -6468,7 +6489,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6525,8 +6546,9 @@ mod_full <- sti_model_norway(country = countryc[i],
           mh_category = mh_categoryc[j], 
           p = 1, q = 0, 
           data = mh_visits5b, 
-          shock_exclude = TRUE, 
-          mean_cond = TRUE)
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -6560,7 +6582,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6651,7 +6673,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6741,7 +6763,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6794,10 +6816,13 @@ if (i %% 9 == 0) {
 
 ```{r}
 # Model
-mod_full <- sti_model(country = countryc[i], 
+mod_full <- sti_model_norway(country = countryc[i], 
           mh_category = mh_categoryc[j], 
           p = 6, q = 0, 
-          data = mh_visits5b)
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE)
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -6831,7 +6856,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 
@@ -6923,7 +6948,7 @@ parameters::model_parameters(mod_full$mod) |>
          ll = CI_low, 
          ul = CI_high) |> 
   mutate(effect = c("Level change", "Trend change"), 
-         across(c(est, ll, ul), ~(round(exp(.x) , 2))), 
+         across(c(est, ll, ul), ~(round(exp(.x) , 3))), 
          p = if_else(p < 0.001, "p < 0.001", 
                      as.character(paste0("p = ", round(p, 3)))), 
          estimate = str_glue("{est} ({ll} to {ul}), {p}"), 

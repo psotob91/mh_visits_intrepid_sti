@@ -1,2 +1,0 @@
-"0","#specify the x-axis (i.e. time units)"
-"0","axis(1,at=0:5*12,labels=F)"

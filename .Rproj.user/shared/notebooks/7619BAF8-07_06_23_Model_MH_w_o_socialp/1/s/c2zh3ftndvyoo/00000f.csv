@@ -1,9 +1,0 @@
-"0","geom_ribbon(aes(x = date, ymin = rate_fact_s, ymax = rate_ctf_s,"
-"0","                    fill = if_else(rate_ctf_s < rate_fact_s,"
-"0","                                ""Excess of visits"", ""Deficit of visits"")),"
-"0","             alpha = 0.5) +"
-"2","Error: Incomplete expression: geom_ribbon(aes(x = date, ymin = rate_fact_s, ymax = rate_ctf_s,
-                    fill = if_else(rate_ctf_s < rate_fact_s,
-                                ""Excess of visits"", ""Deficit of visits"")),
-             alpha = 0.5) +
-"

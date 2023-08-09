@@ -1,7 +1,0 @@
-"0","#Creating the model:"
-"0",""
-"0","# Subset data by country and disease group of interest"
-"0","mh_visitsm <- mh_visits5 %>%"
-"0","  # filter(country == country_s) %>%"
-"0","  filter(mh_category == mh_cat) %>%"
-"0","  arrange(country, mh_category, tn)   #Sort by"

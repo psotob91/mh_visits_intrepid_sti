@@ -1,5 +1,6 @@
 sti_model_norway <- function(country, mh_category, p , q, data, 
-                             shock_exclude = TRUE, mean_cond = TRUE) {
+                             shock_exclude = TRUE, mean_cond = TRUE, 
+                             dum_outlier = TRUE) {
   
   phi <- p
   theta <- q
@@ -15,7 +16,8 @@ sti_model_norway <- function(country, mh_category, p , q, data,
   mh_visitsm <- data %>%
     filter(country == .env$country) %>%
     filter(mh_category == .env$mh_category) %>%
-    arrange(country, mh_category, time)   #Sort by time (important for autocorrelation checking!!)
+    arrange(country, mh_category, time) |>    #Sort by time (important for autocorrelation checking!!)
+    mutate(july = if_else(month == 7, 1, 0))
   
   indexTo |> 
     filter(mh_category == .env$mh_category) |> 
@@ -30,38 +32,63 @@ sti_model_norway <- function(country, mh_category, p , q, data,
       mutate(time_adjusted = time - tpand, 
              time_to_interaction = (time - tpand) * To) |> 
       filter(Norway_Feb21 == 0)
+   
+    if (dum_outlier == TRUE) {
+      glm_model <- glm(
+        numerator ~ 1 + 
+          time + 
+          To + 
+          I(time - tpand):To +
+          harmonic(month, 2, 12) + 
+          july +
+          offset(log(denominator)), 
+        data = mh_visitsm, 
+        family = quasipoisson)
+    } else {
+      glm_model <- glm(
+        numerator ~ 1 + 
+          time + 
+          To + 
+          I(time - tpand):To +
+          harmonic(month, 2, 12) +
+          offset(log(denominator)), 
+        data = mh_visitsm, 
+        family = quasipoisson)
+    }
     
-    glm_model <- glm(
-      numerator ~ 1 + 
-        time + 
-        To + 
-        I(time - tpand):To +
-        harmonic(month, 2, 12) +
-        offset(log(denominator)), 
-      data = mh_visitsm, 
-      family = quasipoisson)
     
   } else {
     
     mh_visitsm <- mh_visitsm |> 
       mutate(time_adjusted = time - tpand, 
              time_to_interaction = (time - tpand) * To)
-    
-    glm_model <- glm(
-      numerator ~ 1 + 
-        time + 
-        To + 
-        I(time - tpand):To +
-        harmonic(month, 2, 12) +
-        Norway_Feb21 + 
-        offset(log(denominator)), 
-      data = mh_visitsm, 
-      family = quasipoisson)
+   
+    if (dum_outlier == TRUE) {
+      glm_model <- glm(
+        numerator ~ 1 + 
+          time + 
+          To + 
+          I(time - tpand):To +
+          harmonic(month, 2, 12) +
+          july + 
+          offset(log(denominator)), 
+        data = mh_visitsm, 
+        family = quasipoisson)
+    } else {
+      glm_model <- glm(
+        numerator ~ 1 + 
+          time + 
+          To + 
+          I(time - tpand):To +
+          harmonic(month, 2, 12) +
+          offset(log(denominator)), 
+        data = mh_visitsm, 
+        family = quasipoisson)
+    }
+
     
   }
 
-
-  
   rst <- rstudent(glm_model)
   arima_mod <- auto.arima(rst)
   # acf_plot <- acf(rst)
@@ -109,7 +136,6 @@ sti_model_norway <- function(country, mh_category, p , q, data,
         To + 
         I(time - tpand):To +
         harmonic(month, 2, 12) +
-        Norway_Feb21 + 
         offset(log(denominator)), 
       random = ~ time|country,
       correlation = corARMA(form = ~ time, p = phi, q = theta), 

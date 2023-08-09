@@ -1,3 +1,0 @@
-"0","knitr::include_graphics(here(""img"", "
-"0","                             ""plot_effects"", "
-"0","                             paste0(mh_categoryc[j], "".png"")))"

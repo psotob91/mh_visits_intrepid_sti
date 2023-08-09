@@ -60,11 +60,6 @@ sti_effect_ploter <- function(model,
     geom_point(aes(x = date, y = rateobs * 1000, color = "Observed rate"), 
                fill = color_point) + 
     geom_line(aes(x = date, 
-                  y = ratepred_s * 1000, 
-                  group = To, 
-                  color = "Seasonal trends"), 
-              alpha = alfa) + 
-    geom_line(aes(x = date, 
                   y = rate_fact * 1000, 
                   group = To, 
                   color = "Pandemic trend")) + 
@@ -76,20 +71,12 @@ sti_effect_ploter <- function(model,
     geom_vline(xintercept = int, 
                linetype = "dashed", 
                color = color_interrupt) + 
-    geom_ribbon(data = datos_rib, 
-                mapping = aes(x = date, 
-                              ymin = rate_fact_s * 1000, 
-                              ymax = rate_ctf_s * 1000,
-                              fill = dif_rate),
-                alpha = alfa_ribbon) +
-    scale_fill_manual(values =
-                        c("Excess of visits" = color_ribbon_ex,
-                          "Deficit of visits" = color_ribbon_def)) + 
     scale_x_date(limits = c(mindate, maxdate), 
                  breaks = "1 year", 
                  expand = expansion(mult = c(0.01, 0.01)),
                  labels = date_format("%Y"), 
                  date_minor_breaks = "6 month") + 
+    scale_y_continuous(trans = 'log') + 
     scale_color_manual(values = c("Observed rate" = color_point, 
                                   "Prepandemic trend" = color_line, 
                                   "Pandemic trend" = color_line, 

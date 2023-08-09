@@ -1,2 +1,0 @@
-"0","# plot the observed rate for pre-intervention period"
-"0","points(data$rate[data$smokban==0],cex=0.7)"
