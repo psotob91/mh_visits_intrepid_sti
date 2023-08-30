@@ -763,6 +763,28 @@ mindate0 <- "2018-01-01"
 maxdate0 <- "2022-01-01"
 ```
 
+
+:::{.callout-note collapse=false appearance='default' icon=true}
+## About harmonic
+
+- When we fit harmonic(month, 2, 12), we get 4 regressors: 
+
+$$cos(\frac{2\times\pi\times\text{month}}{12})$$
+
+$$sin(\frac{2\times\pi\times\text{month}}{12})$$
+
+$$cos(\frac{4\times\pi\times\text{month}}{12})$$
+
+$$sin(\frac{4\times\pi\times\text{month}}{12})$$
+- When we fit harmonic(month, 1, 12), we get 2 regressors: 
+
+$$cos(\frac{2\times\pi\times\text{month}}{12})$$
+
+$$sin(\frac{2\times\pi\times\text{month}}{12})$$
+
+:::
+
+
 ### **Outcome:** All common Mental Health disorders
 
 ::: {.panel-tabset}
@@ -805,8 +827,9 @@ if (i %% 9 == 0) {
 # Model
 mod_full <- sti_model(country = countryc[i], 
           mh_category = mh_categoryc[j], 
-          p = 5, q = 0, 
-          data = mh_visits5b)
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          mod_final = "noharmonic")
 ```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
@@ -814,7 +837,12 @@ mod_full <- sti_model(country = countryc[i],
 ```{r}
 #| message: false
 #| warning: false
-mod_full$auto_plot; mod_full$arima; mod_full$arima
+mod_full$auto_plot
+```
+
+
+```{r}
+mod_full$arima
 ```
 
 - The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
@@ -1265,13 +1293,6 @@ if (i %% 9 == 0) {
 - **Country:** `r countryc[i]`
 - **Mental Health Category:** `r mh_categoryc[j]`
 
-```{r}
-# Model
-mod_full <- sti_model(country = countryc[i], 
-          mh_category = mh_categoryc[j], 
-          p = 8, q = 0, 
-          data = mh_visits5b)
-```
 
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
 
@@ -1279,6 +1300,32 @@ mod_full <- sti_model(country = countryc[i],
 #| message: false
 #| warning: false
 mod_full$auto_plot; mod_full$arima
+```
+
+
+- A pre-specified and more complex model is the following:
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          mod_final = "harmonic2")
+```
+
+```{r}
+compare_parameters(mod_full$mod, mod_full$mod_harm1, mod_full$mod_noharm, select = "{estimate}{stars} ({p})") 
+```
+- The final model would be 
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          mod_final = "noharmonic")
 ```
 
 - The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
@@ -1289,14 +1336,8 @@ mod_full$auto_plot; mod_full$arima
 mod_full$dx.plot
 ```
 
-The final model is the following: 
-
 ```{r}
-summary(mod_full$mod)
-```
-
-```{r}
-parameters::model_parameters(mod_full$mod) |> 
+parameters::model_parameters(mod_full$mod_harm1) |> 
   dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
   filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
   as_data_frame() |> 
@@ -1446,23 +1487,42 @@ if (i %% 9 == 0) {
 - **Country:** `r countryc[i]`
 - **Mental Health Category:** `r mh_categoryc[j]`
 
-```{r}
-# Model
-mod_full <- sti_model_norway(country = countryc[i], 
-          mh_category = mh_categoryc[j], 
-          p = 6, q = 0, 
-          data = mh_visits5b, 
-          shock_exclude = FALSE, 
-          mean_cond = TRUE, 
-          dum_outlier = TRUE)
-```
-
 - The autocorrelation function of residuals from a naive glm that does not account for autocorrelation is the following: 
 
 ```{r}
 #| message: false
 #| warning: false
 mod_full$auto_plot; mod_full$arima
+```
+
+
+- A pre-specified and more complex model is the following:
+
+```{r}
+# Model
+mod_full <- sti_model_norway(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          shock_exclude = FALSE, 
+          mean_cond = TRUE, 
+          dum_outlier = TRUE, 
+          mod_final = "harmonic2")
+```
+
+```{r}
+compare_parameters(mod_full$mod, mod_full$mod_harm1, mod_full$mod_noharm, select = "{estimate}{stars} ({p})") 
+```
+
+- The final model would be 
+
+```{r}
+# Model
+mod_full <- sti_model(country = countryc[i], 
+          mh_category = mh_categoryc[j], 
+          p = 1, q = 0, 
+          data = mh_visits5b, 
+          mod_final = "harmonic1")
 ```
 
 - The normalized residuasl from  a GLMMM that take into account dependence of residuls around the time shows no autocorrelation:
@@ -1473,14 +1533,8 @@ mod_full$auto_plot; mod_full$arima
 mod_full$dx.plot
 ```
 
-The final model is the following: 
-
 ```{r}
-summary(mod_full$mod)
-```
-
-```{r}
-parameters::model_parameters(mod_full$mod) |> 
+parameters::model_parameters(mod_full$mod_noharm) |> 
   dplyr::select(Parameter, Coefficient, CI_low, CI_high, p) |> 
   filter(Parameter %in% c("To", "To:I(time - tpand)")) |> 
   as_data_frame() |> 
